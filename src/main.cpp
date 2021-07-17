@@ -220,6 +220,7 @@
 #include "karts/kart_model.hpp"
 #include "karts/kart_properties.hpp"
 #include "karts/kart_properties_manager.hpp"
+#include "karts/official_karts.hpp"
 #include "modes/cutscene_world.hpp"
 #include "modes/demo_world.hpp"
 #include "network/protocols/connect_to_server.hpp"
@@ -661,6 +662,7 @@ void cmdLineHelp()
     "                           Takes precedence over trilinear or bilinear\n"
     "                           texture filtering.\n"
     "       --shadows=n         Set resolution of shadows (0 to disable).\n"
+    "       --dump-official-karts Dump official karts for current stk-assets.\n"
     "       --apitrace          This will disable buffer storage and\n"
     "                           writing gpu query strings to opengl, which\n"
     "                           can be seen later in apitrace.\n"
@@ -1660,6 +1662,12 @@ int handleCmdLine(bool has_server_config, bool has_parent_process)
     CommandLine::has("-psn");
 #endif
 
+    if (CommandLine::has("--dump-official-karts"))
+    {
+        OfficialKarts::dumpOfficialKarts();
+        return 0;
+    }
+
     CommandLine::reportInvalidParameters();
 
     if (ProfileWorld::isProfileMode() || GUIEngine::isNoGraphics())
@@ -2093,6 +2101,7 @@ int main(int argc, char *argv[])
         GUIEngine::addLoadingIcon( irr_driver->getTexture(FileManager::GUI_ICON,
                                                           "options_video.png"));
         kart_properties_manager -> loadAllKarts    ();
+        OfficialKarts::load();
         handleXmasMode();
         handleEasterEarMode();
 
