@@ -141,6 +141,8 @@ jobs:
         working-directory: build
         run: |
           make -j4
+          # Remove the reserved libsamplerate files
+          rm bin/libsamplerate*
           cd ..
           mv COPYING tools
       - name: Upload binaries of MinGW
