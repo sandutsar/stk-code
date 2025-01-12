@@ -211,8 +211,8 @@ extern "C" {
 #include "config/stk_config.hpp"
 #include "config/user_config.hpp"
 #include "font/font_manager.hpp"
-#include "graphics/camera.hpp"
-#include "graphics/camera_debug.hpp"
+#include "graphics/camera/camera.hpp"
+#include "graphics/camera/camera_debug.hpp"
 #include "graphics/central_settings.hpp"
 #include "graphics/graphics_restrictions.hpp"
 #include "graphics/irr_driver.hpp"
@@ -286,12 +286,14 @@ extern "C" {
 #include "utils/crash_reporting.hpp"
 #include "utils/leak_check.hpp"
 #include "utils/log.hpp"
-#include "utils/mini_glm.hpp"
+#include "mini_glm.hpp"
 #include "utils/profiler.hpp"
 #include "utils/stk_process.hpp"
 #include "utils/string_utils.hpp"
 #include "utils/translation.hpp"
 #include "io/rich_presence.hpp"
+
+#include <IrrlichtDevice.h>
 
 static void cleanSuperTuxKart();
 static void cleanUserConfig();
@@ -512,12 +514,36 @@ void setupRaceStart()
     // a current player
     PlayerManager::get()->enforceCurrentPlayer();
 
-    InputDevice *device;
+    InputDevice *device = NULL;
 
-    // Use keyboard 0 by default in --no-start-screen
-    device = input_manager->getDeviceManager()->getKeyboard(0);
+    // Assign the player a device; check the command line params for preferences; by default use keyboard 0
 
-    // Create player and associate player with keyboard
+    if(UserConfigParams::m_default_keyboard > -1)
+    {
+        device = input_manager->getDeviceManager()->getKeyboard(UserConfigParams::m_default_keyboard);
+    }
+    else if(UserConfigParams::m_default_gamepad > -1)
+    {
+        // getGamePad(int) returns a GamePadDevice which is a subclass of InputDevice
+        // However, the compiler doesn't like it so it has to be manually casted in
+        device = (InputDevice *) input_manager->getDeviceManager()->getGamePad(UserConfigParams::m_default_gamepad);
+    }
+    // If no config requested or if the requested config doesn't exist
+    if (device == NULL)
+    {
+        if (UserConfigParams::m_default_keyboard > -1 ||
+            UserConfigParams::m_default_gamepad > -1)
+        {
+            Log::error("main", "Requested input device unavailable, fallback to the default keyboard");
+        }
+        device = input_manager->getDeviceManager()->getKeyboard(0);
+    }
+
+    // In case the requested config was disabled, enable it.
+    if (!device->getConfiguration()->isEnabled())
+        device->getConfiguration()->setEnabled(true);
+
+    // Create player and associate player with device
     StateManager::get()->createActivePlayer(
         PlayerManager::get()->getPlayer(0), device);
 
@@ -555,10 +581,14 @@ void cmdLineHelp()
                               "menu.\n"
     "  -R,  --race-now         Same as -N but also skip the ready-set-go phase"
                               " and the music.\n"
+    "       --use-keyboard=N   Used in conjunction with the -N or -R option, will assign the player to the specified"
+                              " keyboard. Is zero indexed.\n"
+    "       --use-gamepad=N    Used in conjunction with the -N or -R option, will assign the player to the specified"
+                              " gamepad. Is zero indexed.\n"
     "  -t,  --track=NAME       Start track NAME.\n"
     "       --gp=NAME          Start the specified Grand Prix.\n"
-    "       --add-gp-dir=DIR   Load Grand Prix files in DIR. Setting will be saved\n"
-                              "in config.xml under additional_gp_directory. Use\n"
+    "       --add-gp-dir=DIR   Load Grand Prix files in DIR. Setting will be saved"
+                              "in config.xml under additional_gp_directory. Use"
                               "--add-gp-dir=\"\" to unset.\n"
     "       --stk-config=FILE  use ./data/FILE instead of "
                               "./data/stk_config.xml\n"
@@ -566,7 +596,7 @@ void cmdLineHelp()
     "       --kart=NAME        Use kart NAME.\n"
     "       --ai=a,b,...       Use the karts a, b, ... for the AI, and additional player kart.\n"
     "       --aiNP=a,b,...     Use the karts a, b, ... for the AI, no additional player kart.\n"
-    "       --laps=N           Define number of laps to N.\n"
+    "       --laps=N           Define number of laps to N, if used in a server all races will use this value.\n"
     "       --mode=N           N=0 Normal, N=1 Time trial, N=2 Battle, N=3 Soccer,\n"
     "                          N=4 Follow The Leader, N=5 Capture The Flag. In configure server use --battle-mode=n\n"
     "                          for battle server and --soccer-timed / goals for soccer server\n"
@@ -590,6 +620,7 @@ void cmdLineHelp()
                               "laps.\n"
     "       --profile-time=n   Enable automatic driven profile mode for n "
                               "seconds.\n"
+    "       --benchmark        Start Benchmark Mode, save results and exit. \n"
     "       --unlock-all       Permanently unlock all karts and tracks for testing.\n"
     "       --no-unlock-all    Disable unlock-all (i.e. base unlocking on player achievement).\n"
     "       --xmas=n           Toggle Xmas/Christmas mode. n=0 Use current date, n=1, Always enable,\n"
@@ -867,13 +898,13 @@ int handleCmdLinePreliminary()
                 UserConfigParams::m_blacklist_res.end(),res) ==
                 UserConfigParams::m_blacklist_res.end())
             {
-                UserConfigParams::m_prev_width =
-                    UserConfigParams::m_width = width;
-                UserConfigParams::m_prev_height =
-                    UserConfigParams::m_height = height;
+                UserConfigParams::m_prev_real_width =
+                    UserConfigParams::m_real_width = width;
+                UserConfigParams::m_prev_real_height =
+                    UserConfigParams::m_real_height = height;
                 Log::verbose("main", "You choose to use %dx%d.",
-                    (int)UserConfigParams::m_width,
-                    (int)UserConfigParams::m_height );
+                    (int)UserConfigParams::m_real_width,
+                    (int)UserConfigParams::m_real_height );
             }
             else
                 Log::warn("main", "Resolution %s has been blacklisted, so "
@@ -1672,6 +1703,14 @@ int handleCmdLine(bool has_server_config, bool has_parent_process)
         UserConfigParams::m_race_now = true;
     }   // --race-now
 
+    if(CommandLine::has( "--use-keyboard",&n)) {
+        UserConfigParams::m_default_keyboard = n;
+    } //--use-keyboard
+
+    if(CommandLine::has( "--use-gamepad",&n)) {
+        UserConfigParams::m_default_gamepad = n;
+    } //--use-gamepad
+
     if(CommandLine::has("--laps", &s))
     {
         int laps = atoi(s.c_str());
@@ -1683,7 +1722,10 @@ int handleCmdLine(bool has_server_config, bool has_parent_process)
         else
         {
             Log::verbose("main", "You chose to have %d laps.", laps);
-            RaceManager::get()->setNumLaps(laps);
+            if (NetworkConfig::get()->isServer())
+                ServerLobby::m_fixed_laps = laps;
+            else
+                RaceManager::get()->setNumLaps(laps);
         }
     }   // --laps
 
@@ -1702,6 +1744,13 @@ int handleCmdLine(bool has_server_config, bool has_parent_process)
             RaceManager::get()->setNumLaps(n);
         }
     }   // --profile-laps
+
+    if(CommandLine::has("--benchmark"))
+    {
+        Log::verbose("main", "Benchmark mode requested from command-line");
+        UserConfigParams::m_no_start_screen = true;
+        UserConfigParams::m_benchmark = true;
+    }   // --benchmark
     
     if(CommandLine::has("--unlock-all"))
     {
@@ -1874,6 +1923,7 @@ void initRest()
     // Input manager set first so it recieves SDL joystick event
     GUIEngine::init(device, driver, StateManager::get());
     GUIEngine::renderLoading(true, true, false);
+    GUIEngine::flushRenderLoading(true/*launching*/);
 
 #ifdef ANDROID
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
@@ -2114,7 +2164,6 @@ int main(int argc, char *argv[])
 
     // Up number of maximum concurrent sockets, otherwise we can fail while loading with nxlink
     const SocketInitConfig socketConfig = {
-        .bsdsockets_version = 1,
         .tcp_tx_buf_size        = 0x8000,
         .tcp_rx_buf_size        = 0x10000,
         .tcp_tx_buf_max_size    = 0x40000,
@@ -2281,6 +2330,8 @@ int main(int argc, char *argv[])
         GUIEngine::addLoadingIcon( irr_driver->getTexture(FileManager::GUI_ICON,
                                                           "options_video.png"));
         kart_properties_manager -> loadAllKarts    ();
+        kart_properties_manager->onDemandLoadKartTextures(
+            { UserConfigParams::m_default_kart }, false/*unload_unused*/);
         OfficialKarts::load();
         handleXmasMode();
         handleEasterEarMode();
@@ -2517,21 +2568,6 @@ int main(int argc, char *argv[])
             StateManager::get()->enterGameState();
         }
 
-#ifndef SERVER_ONLY
-        // If an important news message exists it is shown in a popup dialog.
-        if (!GUIEngine::isNoGraphics())
-        {
-            const core::stringw important_message =
-                                        NewsManager::get()->getImportantMessage();
-            if (important_message!="")
-            {
-                new MessageDialog(important_message,
-                                MessageDialog::MESSAGE_DIALOG_OK,
-                                NULL, true);
-            }   // if important_message
-        }
-#endif
-
         // Reset the story mode timer before going in the main loop
         // as it needs to be able to run continuously
         // Now the story mode status and player manager is loaded
@@ -2560,11 +2596,18 @@ int main(int argc, char *argv[])
         {
             if(UserConfigParams::m_no_start_screen)
             {
-                // Quickstart (-N)
-                // ===============
-                // all defaults are set in InitTuxkart()
-                RaceManager::get()->setupPlayerKartInfo();
-                RaceManager::get()->startNew(false);
+                if (UserConfigParams::m_benchmark)
+                {
+                    profiler.startBenchmark();
+                }
+                else
+                {
+                    // Quickstart (-N)
+                    // ===============
+                    // all defaults are set in InitTuxkart()
+                    RaceManager::get()->setupPlayerKartInfo();
+                    RaceManager::get()->startNew(false);
+                }
             }
         }
         else  // profile
@@ -2688,6 +2731,21 @@ static void cleanSuperTuxKart()
     irr_driver->updateConfigIfRelevant();
     AchievementsManager::destroy();
     Referee::cleanup();
+
+    if (SFXManager::get() &&
+        !SFXManager::get()->waitForReadyToDeleted(2.0f))
+    {
+        Log::info("Thread", "SFXManager not stopping, exiting anyway.");
+    }
+    SFXManager::destroy();
+
+    // Music manager can not be deleted before the SFX thread is stopped
+    // (since SFX commands can contain music information, which are
+    // deleted by the music manager).
+    delete music_manager;
+
+    // Race manager needs to be deleted after sfx manager as it checks for
+    // the kart size structure from race manager
     RaceManager::destroy();
     if(grand_prix_manager)      delete grand_prix_manager;
     if(highscore_manager)       delete highscore_manager;
@@ -2744,18 +2802,6 @@ static void cleanSuperTuxKart()
             Log::warn("Thread", "Request Manager not aborting in time, proceeding without cleanup.");
         }
     }
-
-    if (SFXManager::get() &&
-        !SFXManager::get()->waitForReadyToDeleted(2.0f))
-    {
-        Log::info("Thread", "SFXManager not stopping, exiting anyway.");
-    }
-    SFXManager::destroy();
-
-    // Music manager can not be deleted before the SFX thread is stopped
-    // (since SFX commands can contain music information, which are
-    // deleted by the music manager).
-    delete music_manager;
 
     // The add-ons manager might still be called from a currenty running request
     // in the request manager, so it can not be deleted earlier.
