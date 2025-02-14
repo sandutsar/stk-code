@@ -23,7 +23,7 @@
 #include "audio/music_manager.hpp"
 #include "config/user_config.hpp"
 #include "graphics/2dutils.hpp"
-#include "graphics/camera.hpp"
+#include "graphics/camera/camera.hpp"
 #include "graphics/central_settings.hpp"
 #include "graphics/irr_driver.hpp"
 #include "graphics/material.hpp"
@@ -53,6 +53,7 @@
 #include "utils/translation.hpp"
 
 #include <GlyphLayout.h>
+#include <IrrlichtDevice.h>
 #include <ICameraSceneNode.h>
 
 namespace irr
@@ -381,6 +382,8 @@ void RaceGUIBase::drawPowerupIcons(const AbstractKart* kart,
                                    const core::vector2df &scaling)
 {
 #ifndef SERVER_ONLY
+    if (UserConfigParams::m_powerup_display == 2) return;
+
     // If player doesn't have any powerups or has completed race, do nothing.
     const Powerup* powerup = kart->getPowerup();
     if (powerup->getType() == PowerupManager::POWERUP_NOTHING
@@ -397,14 +400,15 @@ void RaceGUIBase::drawPowerupIcons(const AbstractKart* kart,
 
     float scale = (float)(std::min(scaling.X, scaling.Y));
 
-    int nSize = (int)(64.0f * scale);
+    int nSize = (int)(UserConfigParams::m_powerup_size * scale);
 
-    int itemSpacing = (int)(scale * 32.0f);
+    int itemSpacing = (int)(scale * UserConfigParams::m_powerup_size / 2);
 
     int x1, y1;
 
-    // When there is not much height, move items on the side
-    if ((float) viewport.getWidth() / (float) viewport.getHeight() > 2.0f)
+    // When there is not much height or set by user, move items on the side
+    if ((UserConfigParams::m_powerup_display == 1) || 
+        ((float) viewport.getWidth() / (float) viewport.getHeight() > 2.0f))
     {
         x1 = viewport.UpperLeftCorner.X  + 3*(viewport.getWidth()/4)
            - ((n * itemSpacing)/2);
@@ -1030,35 +1034,21 @@ void RaceGUIBase::drawPlayerIcon(AbstractKart *kart, int x, int y, int w,
                                  bool is_local)
 {
 #ifndef SERVER_ONLY
-    video::ITexture *icon =
-    kart->getKartProperties()->getIconMaterial()->getTexture();
+    video::ITexture *icon = kart->getKartProperties()->getIconMaterial()->getTexture();
 
     CaptureTheFlag* ctf = dynamic_cast<CaptureTheFlag*>(World::getWorld());
     unsigned int kart_id = kart->getWorldKartId();
 
     // CTF
-    if (ctf)
+    if (ctf && (ctf->getRedHolder()  == (int)kart_id ||
+                ctf->getBlueHolder() == (int)kart_id))
     {
-        if (ctf->getRedHolder() == (int)kart_id)
-        {
-            video::ITexture* red =
-                irr_driver->getTexture(FileManager::GUI_ICON, "red_flag.png");
-            const core::rect<s32> rect(core::position2d<s32>(0, 0),
-                red->getSize());
-            const core::rect<s32> pos1
-                (x - 20, y - 10, x + w - 20, y + w - 30);
-            draw2DImage(red, pos1, rect, NULL, NULL, true);
-        }
-        else if (ctf->getBlueHolder() == (int)kart_id)
-        {
-            video::ITexture* blue =
-                irr_driver->getTexture(FileManager::GUI_ICON, "blue_flag.png");
-            const core::rect<s32> rect(core::position2d<s32>(0, 0),
-                blue->getSize());
-            const core::rect<s32> pos1
-                (x - 20, y - 10, x + w - 20, y + w - 30);
-            draw2DImage(blue, pos1, rect, NULL, NULL, true);
-        }
+        video::ITexture* flag = irr_driver->getTexture(FileManager::GUI_ICON,
+            (ctf->getRedHolder() == (int)kart_id) ? "red_flag.png" : "blue_flag.png");
+
+        const core::rect<s32> rect(core::position2d<s32>(0, 0), flag->getSize());
+        const core::rect<s32> pos1(x - 20, y - 10, x + w - 20, y + w - 30);
+        draw2DImage(flag, pos1, rect, NULL, NULL, true);
     }
 
     const core::rect<s32> pos(x, y, x+w, y+w);
@@ -1125,7 +1115,12 @@ void RaceGUIBase::drawPlayerIcon(AbstractKart *kart, int x, int y, int w,
     {
         const core::rect<s32> rect(core::position2d<s32>(0,0),
                                    icon->getSize());
-        draw2DImage(icon, pos, rect, NULL, NULL, true, kart->isGhostKart());
+        video::SColor translucence((unsigned)-1);
+        translucence.setAlpha(128);
+        if (kart->isGhostKart())
+            draw2DImage(icon, pos, rect, NULL, translucence, true);
+        else
+            draw2DImage(icon, pos, rect, NULL, NULL, true);
     }
 
     //draw status info - icon fade out in case of rescue/explode

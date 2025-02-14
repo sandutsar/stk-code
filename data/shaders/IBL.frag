@@ -1,6 +1,8 @@
 uniform sampler2D ntex;
 uniform sampler2D dtex;
 uniform sampler2D albedo;
+uniform sampler2D ssao;
+uniform sampler2D ctex;
 
 #ifdef GL_ES
 layout (location = 0) out vec4 Diff;
@@ -15,26 +17,19 @@ out vec4 Spec;
 #stk_include "utils/DiffuseIBL.frag"
 #stk_include "utils/SpecularIBL.frag"
 
-
-float makeLinear(float f, float n, float z)
-{
-    return (2.0f * n) / (f + n - z * (f - n));
-}
-
-vec3 CalcViewPositionFromDepth(in vec2 TexCoord)
+vec3 CalcViewPositionFromDepth(in vec2 uv)
 {
     // Combine UV & depth into XY & Z (NDC)
-    float z = makeLinear(1000.0, 1.0, textureLod(dtex, TexCoord, 0.).x);
-    vec3 rawPosition                = vec3(TexCoord, z);
+    float z = texture(dtex, uv).x;
+    return getPosFromUVDepth(vec3(uv, z), u_inverse_projection_matrix).xyz;
+}
 
-    // Convert from (0, 1) range to (-1, 1)
-    vec4 ScreenSpacePosition        = vec4( rawPosition * 2.0 - 1.0, 1.0);
-
-    // Undo Perspective transformation to bring into view space
-    vec4 ViewPosition               = u_inverse_projection_matrix * ScreenSpacePosition;
-
-    // Perform perspective divide and return
-    return                          ViewPosition.xyz / ViewPosition.w;
+vec2 CalcCoordFromPosition(in vec3 pos)
+{
+    vec4 projectedCoord     = u_projection_matrix * vec4(pos, 1.0);
+    projectedCoord.xy      /= projectedCoord.w;
+    projectedCoord.xy       = projectedCoord.xy * 0.5 + 0.5;
+    return projectedCoord.xy;
 }
 
 // Fade out edges of screen buffer tex
@@ -48,35 +43,43 @@ float GetEdgeFade(vec2 coords)
     return min(min(gradL, gradR), min(gradT, gradB));
 }
 
-vec2 RayCast(vec3 dir, inout vec3 hitCoord, out float dDepth)
+vec2 RayCast(vec3 dir, vec3 hitCoord)
 {
-    dir *= 0.25f;
+    vec2 projectedCoord;
+    vec3 dirstep = dir * 0.5f;
+    float depth;
+    hitCoord += dirstep;
 
-    for(int i = 0; i < 8; ++i) {
-        hitCoord               += dir;
+    for (int i = 1; i <= 32; i++)
+    {
+        projectedCoord          = CalcCoordFromPosition(hitCoord);
 
-        vec4 projectedCoord     = u_projection_matrix * vec4(hitCoord, 1.0);
-        projectedCoord.xy      /= projectedCoord.w;
-        projectedCoord.xy       = projectedCoord.xy * 0.5 + 0.5;
+        float depth             = CalcViewPositionFromDepth(projectedCoord).z;
 
-        float depth             = CalcViewPositionFromDepth(projectedCoord.xy).z;
-        dDepth                  = hitCoord.z - depth;
-
-        if (dDepth < 0.0)
-        {
-            if (projectedCoord.x > 0.0 && projectedCoord.x < 1.0 &&
-                projectedCoord.y > 0.0 && projectedCoord.y < 1.0)
-            {
-                return projectedCoord.xy;
-            }
-            else
-            {
-                return vec2(0.f);
-            }
-        }
+        float directionSign = sign(abs(hitCoord.z) - depth);
+        dirstep = dirstep * (1.0 - 0.5 * max(directionSign, 0.0));
+        hitCoord += dirstep * (-directionSign);
     }
 
-    return vec2(0.f);
+    if (projectedCoord.x > 0.0 && projectedCoord.x < 1.0 &&
+        projectedCoord.y > 0.0 && projectedCoord.y < 1.0)
+    {
+        return projectedCoord.xy;
+    }
+    else
+    {
+        return vec2(0.f);
+    }
+}
+
+vec3 gtaoMultiBounce(float visibility, vec3 albedo)
+{
+    // Jimenez et al. 2016, "Practical Realtime Strategies for Accurate Indirect Occlusion"
+    vec3 a =  2.0404 * albedo - 0.3324;
+    vec3 b = -4.7951 * albedo + 0.6417;
+    vec3 c =  2.7552 * albedo + 0.6903;
+
+    return max(vec3(visibility), ((visibility * a + b) * visibility + c) * visibility);
 }
 
 // Main ===================================================================
@@ -84,9 +87,7 @@ vec2 RayCast(vec3 dir, inout vec3 hitCoord, out float dDepth)
 void main(void)
 {
     vec2 uv = gl_FragCoord.xy / u_screen;
-    vec3 normal = normalize(DecodeNormal(2. * texture(ntex, uv).xy - 1.));
-
-    Diff = vec4(0.25 * DiffuseIBL(normal), 1.);
+    vec3 normal = DecodeNormal(texture(ntex, uv).xy);
 
     float z = texture(dtex, uv).x;
 
@@ -95,9 +96,18 @@ void main(void)
     // Extract roughness
     float specval = texture(ntex, uv).z;
 
+    float ao = texture(ssao, uv).x;
+    // Lagarde and de Rousiers 2014, "Moving Frostbite to PBR"
+    float ao_spec = clamp(pow(max(dot(normal, eyedir), 0.) + ao, exp2(-16.0 * (1.0 - specval) - 1.0)) - 1.0 + ao, 0.0, 1.0);
+
 #ifdef GL_ES
-    Spec = vec4(.25 * SpecularIBL(normal, eyedir, specval), 1.);
+    Diff = vec4(0.25 * DiffuseIBL(normal) * ao, 1.);
+    Spec = vec4(.25 * SpecularIBL(normal, eyedir, specval) * ao_spec, 1.);
 #else
+    vec3 surface_color = texture(ctex, uv).xyz;
+    vec3 ao_multi = gtaoMultiBounce(ao, surface_color);
+    vec3 ao_spec_multi = gtaoMultiBounce(ao_spec, surface_color);
+
     // :::::::: Compute Space Screen Reflection ::::::::::::::::::::::::::::::::::::
 
     // Output color
@@ -110,18 +120,10 @@ void main(void)
     // otherwise just use specular IBL
     if (specval > 0.5)
     {
-        vec3 View_Pos               = CalcViewPositionFromDepth(uv);
-
         // Reflection vector
-        vec3 reflected              = normalize(reflect(eyedir, normal));
+        vec3 reflected              = reflect(-eyedir, normal);
 
-        // Ray cast
-        vec3 hitPos                 = View_Pos.xyz;
-        float dDepth;
-        float minRayStep            = 50.0f;
-
-        vec2 coords = RayCast(reflected * max(minRayStep, -View_Pos.z),
-                                hitPos, dDepth);
+        vec2 coords = RayCast(reflected, xpos.xyz);
 
         if (coords.x == 0.0 && coords.y == 0.0) {
             outColor = fallback;
@@ -140,7 +142,8 @@ void main(void)
         outColor = fallback;
     }
 
-    Spec = vec4(outColor.rgb, 1.0);
+    Diff = vec4(0.25 * DiffuseIBL(normal) * ao_multi, 1.);
+    Spec = vec4(outColor.rgb * ao_spec_multi, 1.0);
 #endif
 
 }
